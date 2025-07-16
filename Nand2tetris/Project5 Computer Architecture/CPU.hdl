@@ -1,0 +1,118 @@
+// This file is part of www.nand2tetris.org
+// and the book "The Elements of Computing Systems"
+// by Nisan and Schocken, MIT Press.
+// File name: projects/5/CPU.hdl
+/**
+ * The Hack Central Processing unit (CPU).
+ * Parses the binary code in the instruction input and executes it according to the
+ * Hack machine language specification. In the case of a C-instruction, computes the
+ * function specified by the instruction. If the instruction specifies to read a memory
+ * value, the inM input is expected to contain this value. If the instruction specifies
+ * to write a value to the memory, sets the outM output to this value, sets the addressM
+ * output to the target address, and asserts the writeM output (when writeM = 0, any
+ * value may appear in outM).
+ * If the reset input is 0, computes the address of the next instruction and sets the
+ * pc output to that value. If the reset input is 1, sets pc to 0.
+ * Note: The outM and writeM outputs are combinational: they are affected by the
+ * instruction's execution during the current cycle. The addressM and pc outputs are
+ * clocked: although they are affected by the instruction's execution, they commit to
+ * their new values only in the next cycle.
+ */
+CHIP CPU {
+
+    IN  inM[16],         // M value input  (M = contents of RAM[A])
+        instruction[16], // Instruction for execution
+        reset;           // Signals whether to re-start the current
+                         // program (reset==1) or continue executing
+                         // the current program (reset==0).
+
+    OUT outM[16],        // M value output
+        writeM,          // Write to M? 
+        addressM[15],    // Address in data memory (of M)
+        pc[15];          // address of next instruction
+
+    PARTS:
+    // is it A or C instruction?
+    // A instruction = 0vvvvvvvvvvvvvvv (15th=0)
+    // C-instruction = 111accccccdddjjj	(15th=1)
+    // / bit 15=1 / bits 14–12=111 / bit 12=a (ALU input) /
+    // / bits 11–6=ALU control / bits 5–3=dest / bits 2–0=jump.
+
+    Not(in= instruction[15], out= instructionApos);     // if 1 then A ins
+    Not(in= instructionApos, out= instructionCpos);     // else C ins
+    // Determine if we should load register A (for both A and C instructions)
+    Or(a= instruction[5], b= instructionApos, out= GoWriteA);
+    // Choose source for register A:
+    //      - For A-instruction: takes the instruction value directly
+    //      - For C-instruction: takes ALU output when dest[0]=1
+    Mux16(a=instruction, b=outALU, sel=instruction[15], out=ARegIn);
+    ARegister(in=ARegIn, load= GoWriteA, out= outA, out[0..14]= addressM);
+    // instruction[4] is the dest bit for reg D
+    And(a= instruction[15], b= instruction[4], out= loadD);
+    DRegister(in= outALU, load= loadD, out= outD);
+    // instruction[12] is bit "a", that decides whether use reg A or M
+    Mux16(a= outA, b= inM, sel= instruction[12], out= valueToALU);
+    ALU(x= outD, y= valueToALU, zx= instruction[11], nx= instruction[10], zy= instruction[9], ny= instruction[8], f= instruction[7], no= instruction[6], out= outALU, zr= ZRout, ng= NGout);
+    // Memory write logic
+    And(a= instruction[15], b= instruction[3], out= writeM, out=GoWriteM);
+    Mux16(a= false, b= outALU, sel= GoWriteM, out= outM);
+
+    // ===================== Jump bits part instruction[2..0] =====================
+    // Negate
+    Not(in= ZRout, out= zrNEG);
+    Not(in= NGout, out= ngNEG);
+    // Extract instruction bits
+    Or(a= instruction[2], b= false, out= firstBit);
+    Or(a= instruction[1], b= false, out= secondBit);
+    Or(a= instruction[0], b= false, out= thirdBit);
+    //Negate instructions
+    Not(in= instruction[2], out= firstNEG);
+    Not(in= instruction[1], out= secondNEG);
+    Not(in= instruction[0], out= thirdNEG);
+    // NULL 
+
+    // JGT 001
+    And(a= firstNEG, b= secondNEG, out= firstsecondNEG);
+    And(a= firstsecondNEG, b= thirdBit, out= doJGT);
+    And(a= zrNEG, b= ngNEG, out= zrngBothNEG);
+    And(a= doJGT, b= zrngBothNEG, out= JGT);
+    // JEQ 010
+    And(a= firstNEG, b= secondBit, out= firstsecondJEQ);
+    And(a= firstsecondJEQ, b= thirdNEG, out= doJEQ);
+    And(a= doJEQ, b= ZRout, out= JEQ);
+    // JGE 011
+    And(a= firstNEG, b= secondBit, out= firstsecondJGE);
+    And(a= firstsecondJGE, b= thirdBit, out= doJGE);
+    And(a= zrNEG, b= ngNEG, out= zrngNEG);
+    Or(a= ZRout, b= zrngNEG, out= ALUgreaterthanZero);
+    And(a= doJGE, b= ALUgreaterthanZero, out= JGE);
+    // JLT 100
+    And(a= firstBit, b= secondNEG, out= firstsecondJLT);
+    And(a= firstsecondJLT, b= thirdNEG, out= doJLT);
+    And(a= doJLT, b= NGout, out= JLT);
+    // JNE 101
+    And(a= firstBit, b= secondNEG, out= firstsecondJNE);
+    And(a= firstsecondJNE, b= thirdBit, out= doJNE);
+    And(a= doJNE, b= zrNEG, out= JNE);
+    // JLE 110
+    And(a= firstBit, b= secondBit, out= firstsecondJLE);
+    And(a= firstsecondJLE, b= thirdNEG, out= doJLE);
+    Or(a= NGout, b= ZRout, out= ngzrPositive);
+    And(a= doJLE, b= ngzrPositive, out= JLE);
+    // JMP 111
+    And(a= firstBit, b= secondBit, out= firstsecondJMP);
+    And(a= firstsecondJMP, b= thirdBit, out= JMP);
+    //Program Counter
+    // Decide whether to jump or increment
+    Or(a= JGT, b= JEQ, out= jgtJEQ);
+    Or(a= JGE, b= JLT, out= jgeJLT);
+    Or(a=JNE, b=JLE, out= jneJLE);
+    Or(a= jgtJEQ, b= jgeJLT, out= temp1);
+    Or(a= temp1, b= jneJLE, out= temp2);
+    Or(a= temp2, b= JMP, out= shouldJump);
+    And(a= shouldJump, b= instruction[15], out= decideJMP);
+    Not(in= decideJMP, out= continue);
+    // ====================== Final PC decision ======================
+    PC(in= outA, load= decideJMP, inc= continue, reset= reset, out[0..14]= pc);
+
+}
